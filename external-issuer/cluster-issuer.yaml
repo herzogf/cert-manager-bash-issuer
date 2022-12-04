@@ -1,0 +1,6 @@
+apiVersion: dummy-issuer.herzog.fyi/v1alpha1
+kind: ClusterIssuer
+metadata:
+  name: dummy-cluster-issuer
+spec:
+  caName: "my-dummy-ca"

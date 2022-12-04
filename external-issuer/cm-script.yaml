@@ -1,0 +1,102 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: script-cm
+  namespace: dummy-issuer
+data:
+  controller.sh: |
+    #!/bin/bash
+    mkdir /tmp/bin
+    curl -L -o /tmp/bin/kubectl https://storage.googleapis.com/kubernetes-release/release/$(curl -s https://storage.googleapis.com/kubernetes-release/release/stable.txt)/bin/linux/amd64/kubectl
+    chmod +x /tmp/bin/kubectl
+    export PATH="$PATH:/tmp/bin"
+    while true ; do
+      echo "Starting watch for CertificateRequests in all namespaces."
+      kubectl get CertificateRequests \
+        --all-namespaces -w \
+        -o='custom-columns=Namespace:.metadata.namespace,Name:.metadata.name,IssuerRefGroup:.spec.issuerRef.group' | \
+        grep 'dummy-issuer.herzog.fyi' | \
+        while read foundCertificateRequestLine ; do
+          nsName=$(echo -n "$foundCertificateRequestLine" | awk '{ print $1 }')
+          crName=$(echo -n "$foundCertificateRequestLine" | awk '{ print $2 }')
+          echo "Starting issuer for project=$nsName, CertificateRequest=$crName"
+          /scripts/issuer.sh "$nsName" "$crName"
+        done
+      echo "$(date) Restarting watch for CertificateRequests in 5 seconds."
+      sleep 5;
+    done
+  issuer.sh: |
+    #!/bin/bash
+    nsName="$1"
+    crName="$2"
+    certificateRequest="$(kubectl get CertificateRequests "$crName" -n "$nsName" -o json)"
+    issuerKind="$(echo -n "$certificateRequest" | jq -r .spec.issuerRef.kind | tr '[:upper:]' '[:lower:]')"
+    if [[ "$issuerKind" != "issuer" && "$issuerKind" != "clusterissuer" ]] ; then
+      echo "CertificateRequest issuer kind must be Issuer or ClusterIssuer, skipping." 1>&2
+      exit 1
+    fi
+
+    approvedStatus="$(echo -n "$certificateRequest" | jq -r '.status.conditions[] | select(.type == "Approved") | .status')"
+    if [[ "$approvedStatus" != "True" ]] ; then
+      echo "CertificateRequest is not approved yet, skipping."
+      exit 0
+    fi
+
+    readyStatus="$(echo -n "$certificateRequest" | jq -r '.status.conditions[] | select(.type == "Ready") | .status')"
+    if [[ "$readyStatus" == "True" ]] ; then
+      echo "CertificateRequest is already in ready state, skipping."
+      exit 0
+    fi
+
+    readyReason="$(echo -n "$certificateRequest" | jq -r '.status.conditions[] | select(.type == "Ready") | .reason')"
+    if [[ "$readyReason" == "Failed" ]] ; then
+      echo "CertificateRequest is marked as failed, skipping." 1>&2
+      exit 2
+    fi
+    
+    issuerName="$(echo -n "$certificateRequest" | jq -r .spec.issuerRef.name)"
+    csr="$(echo -n "$certificateRequest" | jq -r .spec.request | base64 -d)"
+
+    echo "Getting issuer $issuerName of kind $issuerKind."
+    # kubectl ignores -n nsName for cluster-scoped ressources 
+    issuerCaName="$(kubectl get "${issuerKind}.dummy-issuer.herzog.fyi" "$issuerName" -n "$nsName" -o json | jq -r .spec.caName)"
+    if [[ -z "$issuerCaName" ]] ; then
+      echo "caName in issuer "${issuerKind}.dummy-issuer.herzog.fyi" in namespace $nsName must not be empty." 1>&2
+      exit 3
+    fi
+
+    tempDir="$(mktemp -d)"
+    cd "$tempDir"
+    # Generate self signed CA
+    openssl req -nodes -new -x509 -sha256 -days 3650 -keyout ca.key -out ca.crt -subj "/CN=${issuerCaName}"
+    # Create cert
+    echo "$csr" > csr.pem
+    # we should read the duration and usages from CertificateRequest - using hard-coded values for simplicity
+    # see https://cert-manager.io/docs/concepts/certificaterequest/
+    openssl x509 -req -in csr.pem -CA ca.crt -CAkey ca.key -out cert.pem -sha256 -CAcreateserial -days 365
+
+    # DAMN - using kubectl to patch the status section only works on k8s >= 1.24, see
+    # https://kubernetes.io/docs/tasks/manage-kubernetes-objects/update-api-object-kubectl-patch/#scale-kubectl-patch
+    # add signed certificate and CA to status
+    # set condition Ready to status True , Reason Issued , Message "issued by dummy issuer"
+    caCertBase64="$(cat ca.crt | base64 -w0)"
+    certBase64="$(cat cert.pem | base64 -w0)"
+    lastTransitionTime="$(date +"%Y-%m-%dT%TZ")"
+    # write new status as json to file
+    echo "$certificateRequest" | jq "del(.status.conditions[] | select(.type == \"Ready\")) | .status.conditions += [{\"type\": \"Ready\", \"status\": \"True\", \"reason\": \"Issued\", \"message\": \"issued by dummy issuer\", \"lastTransitionTime\": \"${lastTransitionTime}\"}] | {status} | .status.ca = \"${caCertBase64}\" | .status.certificate = \"${certBase64}\"" > status.json
+
+    # call k8s api from within pod, see https://kubernetes.io/docs/tasks/run-application/access-api-from-pod/#without-using-a-proxy
+    APISERVER=https://kubernetes.default.svc
+    # Path to ServiceAccount token
+    SERVICEACCOUNT=/var/run/secrets/kubernetes.io/serviceaccount
+    TOKEN=$(cat ${SERVICEACCOUNT}/token)
+    K8SCACERT=${SERVICEACCOUNT}/ca.crt
+
+    echo "Adding new cert to CertificateRequest and updating status to Ready=True"
+    curl -vvv -XPATCH --data-binary "@status.json" -H "Accept: application/json" -H "Content-Type: application/merge-patch+json" \
+      --header "Authorization: Bearer $TOKEN" \
+      --cacert ${K8SCACERT} \
+      "${APISERVER}/apis/cert-manager.io/v1/namespaces/${nsName}/certificaterequests/${crName}/status"
+
+    cd /
+    #rm -rf "$tempDir"

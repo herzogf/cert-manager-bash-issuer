@@ -1,0 +1,30 @@
+# permissions to approve all dummy-issuer.herzog.fyi requests
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-controller-approve:dummy-issuer.herzog.fyi
+rules:
+- apiGroups:
+  - cert-manager.io
+  resources:
+  - signers
+  verbs:
+  - approve
+  resourceNames:
+  - issuers.dummy-issuer.herzog.fyi/*
+  - clusterissuers.dummy-issuer.herzog.fyi/*
+---
+# bind the cert-manager internal approver to approve
+# dummy-issuer.herzog.fyi CertificateRequests
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-controller-approve:dummy-issuer.herzog.fyi
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-controller-approve:dummy-issuer.herzog.fyi
+subjects:
+- kind: ServiceAccount
+  name: cert-manager
+  namespace: cert-manager

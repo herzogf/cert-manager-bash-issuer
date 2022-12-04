@@ -1,0 +1,25 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/issuer-group: dummy-issuer.herzog.fyi
+    cert-manager.io/issuer-kind: ClusterIssuer
+    cert-manager.io/issuer: dummy-cluster-issuer
+  name: ingress-with-dummy-issuer-cert
+  namespace: default
+spec:
+  rules:
+  - host: dummy.example.com
+    http:
+      paths:
+      - pathType: Prefix
+        path: /
+        backend:
+          service:
+            name: myservice
+            port:
+              number: 80
+  tls:
+  - hosts:
+    - dummy.example.com
+    secretName: ingress-with-dummy-issuer-cert
