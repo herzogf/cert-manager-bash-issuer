@@ -93,10 +93,10 @@ data:
     K8SCACERT=${SERVICEACCOUNT}/ca.crt
 
     echo "Adding new cert to CertificateRequest and updating status to Ready=True"
-    curl -vvv -XPATCH --data-binary "@status.json" -H "Accept: application/json" -H "Content-Type: application/merge-patch+json" \
+    curl -XPATCH --data-binary "@status.json" -H "Accept: application/json" -H "Content-Type: application/merge-patch+json" \
       --header "Authorization: Bearer $TOKEN" \
       --cacert ${K8SCACERT} \
       "${APISERVER}/apis/cert-manager.io/v1/namespaces/${nsName}/certificaterequests/${crName}/status"
 
     cd /
-    #rm -rf "$tempDir"
+    rm -rf "$tempDir"
